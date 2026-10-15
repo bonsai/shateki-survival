@@ -40,7 +40,8 @@ Panda3D + Python ─────────── ゲーム状態の唯一の�
   ├─ 照準・射撃・弾道
   ├─ 敵の移動・当たり判定・HP・スコア
   ├─ wave・難易度・標準敵へのフォールバック
-  └─ 入力アダプター（マウス → 将来MediaPipe）
+  └─ 入力アダプター（マウス / MediaPipe）
+        └─ MediaPipe + OpenCV: camera → landmarks → normalized aim / gesture events
 
 後段: FastAPIジョブAPI / MCP
       生成依頼と状態確認のみ。フレームごとのゲーム制御はしない。
@@ -90,13 +91,14 @@ Panda3D + Python ─────────── ゲーム状態の唯一の�
 ## 6. 実装順序
 
 1. **P0 — Panda3Dのレール型3D射的コア**：固定敵、カメラ、照準、射撃、命中判定、wave、HP、スコア。マウスだけで遊べる。
-2. **P1 — AlienSpecと検証**：JSON Schema/Pydantic、制約、drone/tentacle/bossのfixture。
-3. **P2 — Blender headless生成**：固定の`bpy`スクリプトがfixtureからローポリ敵を生成。
-4. **P3 — アセット検証・登録**：形式・サイズ・複雑度・manifestを検証し、versioned assetとして保存。
-5. **P4 — Panda3D Asset Registry**：検証済みアセットをロードし、敵として表示。失敗時は標準敵に戻す。
-6. **P5 — 非同期生成API / MCP**：必要になった時点でジョブキューと状態照会を追加。
-7. **P6 — E2Eと評価**：AlienSpec → Blender → 検証 → Panda3D表示、失敗時のフォールバックをテスト。
-8. **後段 — MediaPipe / VLM / Imagen / Kaggle**：コアゲームと生成パイプラインが安定してから個別に追加。
+2. **P1 — MediaPipe身体入力**：OpenCVでカメラを取得し、MediaPipeで手・身体ランドマークを推定。座標を正規化して照準へ変換し、必要なら明示的なジェスチャーで射撃する。カメラ利用不可時はマウスへ戻る。
+3. **P2 — AlienSpecと検証**：JSON Schema/Pydantic、制約、drone/tentacle/bossのfixture。
+4. **P3 — Blender headless生成**：固定の`bpy`スクリプトがfixtureからローポリ敵を生成。
+5. **P4 — アセット検証・登録**：形式・サイズ・複雑度・manifestを検証し、versioned assetとして保存。
+6. **P5 — Panda3D Asset Registry**：検証済みアセットをロードし、敵として表示。失敗時は標準敵に戻す。
+7. **P6 — 非同期生成API / MCP**：必要になった時点でジョブキューと状態照会を追加。
+8. **P7 — E2Eと評価**：AlienSpec → Blender → 検証 → Panda3D表示、失敗時のフォールバックをテスト。
+9. **後段 — VLM / Imagen / Kaggle**：コアゲーム、身体入力、生成パイプラインが安定してから個別に追加.
 
 ## 7. 最初のファイル構成
 
@@ -125,11 +127,12 @@ shateki-survival/
 └── tests/
 ```
 
-まずはP0に必要なファイルだけを作る。FastAPI、MCP、MediaPipe、VLM、Imagen、Kaggleは後段の依存とし、コアゲームを動かすための必須条件にしない。
+まずはP0に必要なファイルだけを作る。MediaPipeはP1で独立した入力アダプターとして追加する。FastAPI、MCP、VLM、Imagen、Kaggleは後段の依存とし、コアゲームを動かすための必須条件にしない。
 
 ## 8. MVP受け入れ条件
 
 - Panda3Dでレール型の3D射的を起動し、マウス照準と射撃で敵を撃破できる。
+- MediaPipe入力を有効化すると、カメラから得たランドマークで照準を操作できる。カメラ停止時はマウスにフォールバックする。
 - 敵の当たり判定、HP、スコア、waveが動作する。
 - Blenderを起動しなくても、同梱の標準敵でプレイできる。
 - 固定AlienSpecからローポリモデルを生成し、検証済みアセットだけをゲームに追加できる。
