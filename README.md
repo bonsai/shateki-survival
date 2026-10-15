@@ -1,175 +1,138 @@
-# 射的サバイバル — 宇宙転生インベーダー
+# 射的サバイバル — 宇宙転生レール型3D射的
 
-**射的の名人が宇宙に転生し、宇宙人と戦うシューティングゲーム。**
+**射的の名人が宇宙に転生し、AIが生み出す宇宙人を撃ち落とすレール型3Dシューティング。**
 
-既存のインベーダーゲームを、姿勢入力・生成AIの敵・適応的な敵編成・宇宙的な演出でリッチにするプロジェクト。まずはローカルPCで動く小さな縦切りPoCを作り、生成系AIが止まってもゲーム本体は遊べる設計にする。
+プレイヤーは自動で進む宇宙空間から照準を合わせて射撃する。AIが宇宙人の設計JSONを提案し、Blender `bpy` がローポリ3Dモデルを生成、検証済みアセットをPanda3Dへ取り込む。まずは固定の敵で遊べる最小ゲームを作り、その後にAI生成をつなぐ。
 
-## 1. 推奨スタック
+## 1. 採用STACK
 
 | 層 | 技術 | 責務 |
 |---|---|---|
-| Frontend / Renderer | **p5.js + TypeScript（段階導入）** | ゲーム画面、照準、弾、敵スプライト、パーティクル、HUD、入力の表示 |
-| Local Backend / API | **Python + FastAPI + WebSocket** | ゲーム状態、敵スポーン指示、イベント配信、モデル/APIとの境界 |
-| Computer Vision | **MediaPipe Tasks / Python SDK** | カメラから身体・手のランドマークを取得。射的の照準や回避ジェスチャーに変換 |
-| CV / VLM | **OpenCV + 必要時のみVLM** | カメラ入力の前処理。VLMはラウンド間の状況要約・敵テーマ選択など低頻度用途に限定 |
-| Image Generation | **Imagen等の画像生成API** | 敵・ボス・背景の素材生成。ゲーム中は非同期で生成し、完成済み素材をキャッシュ |
-| Enemy Director | **Pythonのルールエンジン → MCP Server** | 難易度、敵タイプ、スポーン位置、波状攻撃、ボス出現を管理。MCPは明示的なツール境界として提供 |
-| Offline ML | **Kaggle（GPU Notebook）** | 敵の特徴・行動パラメータ・難易度制御モデルの学習と評価。学習済み成果物をローカルへ持ち帰る |
-| Game Logic Engine | **初期はPythonの状態機械。Godotは第2段階で評価** | まずゲームルールを単純な状態機械で実装。物理、衝突、複雑なシーン、3D演出が必要になった時点でGodotへ移行を判断 |
-| Asset / Data | **JSON + PNG/WebP + JSONLログ** | 敵定義、生成条件、素材メタデータ、ラウンド履歴、評価記録 |
-| Protocol | **WebSocket + JSON schema** | p5.jsとPythonの疎結合な通信契約 |
+| 3Dゲーム | **Panda3D + Python** | 3Dシーン、レール移動、カメラ、照準、射撃、当たり判定、敵、HP、スコア、wave、ゲーム状態の唯一の所有者 |
+| 3Dアセット生成 | **Blender + bpy** | 検証済みAlienSpec JSONからローポリモデル・色・簡単なアニメーションを決定的に生成し、GLB/glTF等で書き出す |
+| AI設計 | **LLM / VLM（任意）** | 宇宙人のテーマ・部位・配色・アニメーション候補を構造化JSONで提案。任意コードは生成・実行しない |
+| 生成ジョブ/API | **Python + FastAPI（必要になってから）** | 設計・Blender生成の非同期ジョブ、状態、アセットマニフェストを管理。ゲーム状態は所有しない |
+| エージェント接続 | **MCP（後段）** | 生成ジョブ作成・状態照会・承認済みアセット一覧など限定ツールを提供 |
+| Computer Vision（後段） | **MediaPipe + OpenCV** | カメラから手・身体の位置を取得し、照準や回避入力に変換。マウスでも必ず遊べるようにする |
+| 画像生成（任意） | **Imagen等** | コンセプト画像やテクスチャ案を作る。画像だけで完成3Dモデルが得られるとは仮定しない |
+| 評価（後段） | **JSONL + pytest。必要ならKaggle** | AlienSpec、生成結果、難易度やゲームプレイの再現可能な評価 |
+| データ契約 | **JSON Schema / JSONL** | AlienSpec、アセットmanifest、生成ジョブ、ゲームイベントの記録 |
 
-### Godotを最初から入れるべきか
-
-**初期版では入れない方針を推奨。** p5.jsをフロントにするなら、Godotをゲームロジック専用に追加すると、p5.js ↔ Godot ↔ Pythonの同期・デバッグが増えます。最初はPythonの状態機械を権威あるゲーム状態として、p5.jsは描画と入力表示に集中させます。
-
-次の条件が出たらGodotを再評価します。
-
-- 3D空間、複雑な当たり判定、物理演算、シーン遷移が主要機能になった
-- 敵や弾の数が増えてp5.js側の管理が難しくなった
-- エディタ、アニメーションツリー、エクスポート先の利点が追加の接続コストを上回る
-
-Godotを採用する場合は、**ゲームロジックの所有者をGodotに一本化**し、PythonはCV・生成・敵編成提案、p5.jsは独立した演出ビューに限定する。PythonとGodotの両方でHP・衝突・スポーン状態を二重管理しない。
+**Java、Unity、Unreal、Godot、p5.jsはMVPの必須依存にしない。** ゲーム本体と生成ツールをPython中心にまとめ、最初から複数エンジンを接続しない。
 
 ## 2. アーキテクチャ
 
 ```text
-Camera
-  ↓
-Python / MediaPipe ── pose features ───────────┐
-                                               ↓
-p5.js UI  ←── WebSocket / JSON ──→ Python Game State
-  ↑                                    │
-  │ render only                        ├── Rule-based Enemy Director
-  │                                    ├── MCP tools: spawn / set wave / inspect state
-  │                                    ├── VLM: round-boundary scene understanding (optional)
-  │                                    └── Imagen API: async enemy/background generation
-  │                                                  ↓
-  └──────────── cached PNG/WebP assets ←── Asset Registry
-                                                     ↑
-                                  Kaggle offline training/evaluation
+LLM / VLM（設計候補のみ）
+        │ AlienSpec JSON
+        ▼
+JSON Schema / Pydantic 検証
+        │ valid spec
+        ▼
+Blender headless + bpy（固定スクリプト）
+        │ low-poly model
+        ▼
+GLB/glTF 書き出し → 検証 → versioned manifest
+        │ ready asset only
+        ▼
+Panda3D + Python ─────────── ゲーム状態の唯一の所有者
+  ├─ レール型3Dカメラ・背景
+  ├─ 照準・射撃・弾道
+  ├─ 敵の移動・当たり判定・HP・スコア
+  ├─ wave・難易度・標準敵へのフォールバック
+  └─ 入力アダプター（マウス → 将来MediaPipe）
+
+後段: FastAPIジョブAPI / MCP
+      生成依頼と状態確認のみ。フレームごとのゲーム制御はしない。
 ```
 
-**リアルタイム経路と生成経路を分離する。**
+### 重要な境界
 
-- リアルタイム経路：入力取得 → ゲーム状態更新 → WebSocket → 描画。毎フレーム外部AIを待たない。
-- 生成経路：敵の設計 → 画像生成 → 検証・縮小・透過処理 → キャッシュ登録。生成に失敗しても既定の敵で続行。
-- 学習経路：Kaggleでオフライン学習・評価 → バージョン付きモデル／JSONパラメータをローカルへ配布。
-- MCP経路：ゲーム状態を直接書き換える自由な接続ではなく、許可されたコマンドを検証して実行する。
+- **Panda3D** がゲームの実行時状態を所有する。HP、衝突、スコア、スポーンを別のPython API側で二重管理しない。
+- **Blenderはオフライン／バックグラウンドのアセット生成器**。ゲームの各フレームでBlenderを起動しない。
+- **AlienSpecはデータ契約**。AIが返した文字列をPythonコードやBlenderスクリプトとして実行しない。
+- **見た目とゲーム能力は分離**。モデルは外観だけ、HP・速度・攻撃頻度などは検証済みJSONで管理する。
+- **生成とプレイを分離**。生成が遅い・失敗・Blender未導入でも、同梱の標準敵でゲームを続けられる。
+- GLB/glTFの読み込みは採用するPanda3Dバージョンとインポータで検証する。直接読み込みが不安定な場合は、Blender側からPanda3D互換形式へ変換するアダプターを追加する。
 
-## 3. ゲームコンセプト
+## 3. ゲームの最小ループ
 
-- **主人公**：射的の名人。異世界転生後、宇宙の射的技術で侵略者を迎撃する。
-- **基本ループ**：照準を合わせる → 撃つ → 敵の弱点を見抜く → 素材・スコアを獲得 → 次の敵編成へ。
-- **入力**：最初はマウス／タッチで遊べるようにし、MediaPipeによる身体入力を追加オプションにする。
-- **敵**：Imagenで見た目を生成し、敵の当たり判定・HP・速度・攻撃パターンはJSON定義で管理する。画像そのものにゲームルールを持たせない。
-- **敵の生成制御**：VLMや学習モデルはテーマ・難易度の候補を提案し、スポーン可否・上限・攻撃頻度はルールエンジンが検証する。
-- **リッチ化**：パララックス背景、弾道トレイル、命中エフェクト、撃破演出、ボスの段階変化、ラウンド間の物語演出。
+1. プレイヤーは自動で進むレール型3D空間にいる。
+2. マウスで照準を動かし、クリックで射撃する。
+3. 敵が奥から出現し、決められたレーン／軌道を移動する。
+4. 命中・撃破でスコアを獲得。敵の通過や攻撃で残機が減る。
+5. waveごとに敵の組合せを変える。
+6. まず固定のローポリ敵で完成させ、次にAlienSpecから生成した敵を追加する。
 
-## 4. 疎結合のデータ契約
+初期MVPではフル自由移動や複雑な物理を避ける。レール移動、照準、射撃、命中判定、敵の出現、スコアが遊べることを優先する。
 
-### p5.js → Python（入力・操作）
+## 4. AlienSpec（概念契約）
 
-```json
-{
-  "type": "player.action",
-  "seq": 42,
-  "action": "fire",
-  "aim": { "x": 0.62, "y": 0.31 },
-  "source": "mouse"
-}
-```
+設計JSONは最低限、次の情報を持つ。
 
-### Python → p5.js（描画状態）
+- `schema_version`, `alien_id`, `theme`
+- `body_parts`: 許可されたプリミティブ形状と寸法
+- `palette`: 色・発光色
+- `animation_profile`: 許可済みの簡単な動き
+- `gameplay`: HP、速度、スコア、攻撃頻度などの制約付きパラメータ
 
-```json
-{
-  "type": "game.snapshot",
-  "tick": 120,
-  "wave": 2,
-  "player": { "hp": 3, "score": 120, "aim": { "x": 0.62, "y": 0.31 } },
-  "enemies": [
-    { "id": "enemy-001", "kind": "drone", "x": 0.7, "y": 0.2, "hp": 2, "asset": "enemies/drone-001.webp" }
-  ]
-}
-```
+形状・部位数・寸法・ポリゴン数・マテリアル数・アニメーション種別に上限を設ける。最初は球、円錐、カプセル、楕円体、触手状パーツなどの組合せで生成し、AIによる任意トポロジー生成や自動リギングは後回しにする。
 
-座標は0〜1の正規化座標。各メッセージに `type` と `seq` / `tick` を持たせ、再送・古い状態・不正な値を処理できるようにする。具体的なJSON SchemaはMVP実装時に追加する。
+## 5. アセットのライフサイクル
 
-## 5. 敵生成 MCP Server
+`queued → designing → modeling → validating → ready | failed`
 
-MCPは生成AIそのものではなく、エージェントが使える**制限付きゲーム操作API**として設計する。
+- 出力例：`assets/enemies/<alien_id>/<version>.glb` と対応するmanifest。
+- manifestにはID、バージョン、spec hash、生成スクリプトのバージョン、ファイルサイズ、検証結果を記録。
+- 検証前のファイルをゲームから参照しない。同名ファイルを無言で上書きしない。
+- `failed` または未知のIDは、Panda3D内蔵の標準ローポリ敵へフォールバックする。
 
-最小ツール候補：
+## 6. 実装順序
 
-- `get_game_state()` — 現在のwave、敵数、難易度、プレイヤー残機を読む
-- `propose_enemy(spec)` — 敵定義の候補を検証する（即時スポーンはしない）
-- `spawn_enemy(enemy_id, lane)` — 許可された敵を上限内で出現させる
-- `set_wave_preset(preset_id)` — 登録済み編成を適用する
-- `request_enemy_asset(theme, constraints)` — 画像生成ジョブをキューに登録する
-- `get_asset_job(job_id)` — 生成状態を確認する
+1. **P0 — Panda3Dのレール型3D射的コア**：固定敵、カメラ、照準、射撃、命中判定、wave、HP、スコア。マウスだけで遊べる。
+2. **P1 — AlienSpecと検証**：JSON Schema/Pydantic、制約、drone/tentacle/bossのfixture。
+3. **P2 — Blender headless生成**：固定の`bpy`スクリプトがfixtureからローポリ敵を生成。
+4. **P3 — アセット検証・登録**：形式・サイズ・複雑度・manifestを検証し、versioned assetとして保存。
+5. **P4 — Panda3D Asset Registry**：検証済みアセットをロードし、敵として表示。失敗時は標準敵に戻す。
+6. **P5 — 非同期生成API / MCP**：必要になった時点でジョブキューと状態照会を追加。
+7. **P6 — E2Eと評価**：AlienSpec → Blender → 検証 → Panda3D表示、失敗時のフォールバックをテスト。
+8. **後段 — MediaPipe / VLM / Imagen / Kaggle**：コアゲームと生成パイプラインが安定してから個別に追加。
 
-安全柵：敵数、HP、速度、発射頻度、素材サイズ、生成時間に上限を設ける。AIが返したJSONはスキーマ検証し、未知のコマンドや任意コード実行を許可しない。
-
-## 6. Imagen・VLM・Kaggleの役割分担
-
-- **Imagen**：見た目の素材生成。ゲームの進行や毎フレームの制御には使わない。
-- **VLM**：画像・状態の意味的な解釈が必要な時だけ使う。カメラ映像から子どもの感情や性格を推測する設計はしない。
-- **Kaggle**：敵の行動パラメータやwave構成をオフラインで学習・比較する。ゲーム本体からKaggle Notebookをリアルタイム呼び出ししない。
-- **MediaPipe**：低遅延なランドマーク取得。まずは手や上半身の位置から照準・回避の単純な特徴量を作る。
-- **ルールエンジン**：最終的なゲーム状態の更新を担当し、生成AIは候補提案に限定する。
-
-## 7. 実装フェーズ
-
-1. **P0 — Playable core**：p5.jsの既存インベーダー風ゲーム、マウス照準、発射、衝突、HP、スコア、wave。画像素材は仮素材でよい。
-2. **P1 — Local backend**：FastAPI、WebSocket、サーバー側状態管理、JSON契約、再接続時のsnapshot。
-3. **P2 — MediaPipe**：Pythonカメラ入力と照準／回避特徴量。カメラがなくてもマウスで全機能をテスト可能にする。
-4. **P3 — Enemy asset pipeline**：Imagenの非同期ジョブ、生成結果の検証、キャッシュ、フォールバック素材。
-5. **P4 — MCP director**：状態取得、編成提案、制限付きspawn、ログとリプレイ。
-6. **P5 — Kaggle evaluation**：難易度・敵編成の評価データを用意し、ベースラインと学習モデルを比較。
-7. **P6 — Godot decision**：複雑な物理／3D／シーン管理が必要かを実測し、採用ならゲーム状態の所有者をGodotに移す設計を別途決定。
-
-## 8. MVPの受け入れ条件
-
-- カメラや生成APIがなくても、マウス操作で1ラウンド最後まで遊べる。
-- ゲーム状態は単一の所有者が更新し、フロントは受け取ったsnapshotを描画する。
-- 敵の見た目（asset）とゲーム上の能力（JSON定義）が独立している。
-- 生成AIが遅い／失敗した場合はキャッシュまたは仮素材で続行できる。
-- MediaPipe、MCP、VLM、Imagenの各機能を個別に無効化してもコアゲームが起動する。
-- カメラ映像はデフォルトで保存しない。ログにはゲームイベントと数値のみを記録する。
-
-## 9. 最初に作るファイル構成
+## 7. 最初のファイル構成
 
 ```text
 shateki-survival/
 ├── README.md
-├── frontend/
-│   ├── index.html
-│   ├── src/
-│   │   ├── main.ts
-│   │   ├── render/
-│   │   ├── input/
-│   │   └── net/
-│   └── package.json
-├── backend/
-│   ├── app.py
-│   ├── game/
-│   │   ├── state.py
-│   │   ├── rules.py
-│   │   └── enemy_director.py
-│   ├── vision/
-│   ├── generation/
-│   ├── mcp_server/
-│   └── schemas/
+├── game/
+│   ├── main.py
+│   ├── scenes/
+│   ├── actors/
+│   ├── systems/
+│   └── assets/
+├── alien_pipeline/
+│   ├── schemas/alien_spec.schema.json
+│   ├── alien_spec.py
+│   ├── blender_worker.py
+│   └── validate_asset.py
+├── blender/
+│   └── generate_alien.py
 ├── assets/
 │   ├── enemies/
-│   ├── backgrounds/
 │   └── manifest.json
 ├── data/
 │   ├── enemy_specs/
 │   └── eval/
-└── notebooks/
-    └── kaggle/
+└── tests/
 ```
 
-この構成は初期の論理分割です。実装を始める際は、まずP0/P1に必要なファイルだけを作り、空のディレクトリや将来機能を先に増やさないでください。
+まずはP0に必要なファイルだけを作る。FastAPI、MCP、MediaPipe、VLM、Imagen、Kaggleは後段の依存とし、コアゲームを動かすための必須条件にしない。
+
+## 8. MVP受け入れ条件
+
+- Panda3Dでレール型の3D射的を起動し、マウス照準と射撃で敵を撃破できる。
+- 敵の当たり判定、HP、スコア、waveが動作する。
+- Blenderを起動しなくても、同梱の標準敵でプレイできる。
+- 固定AlienSpecからローポリモデルを生成し、検証済みアセットだけをゲームに追加できる。
+- 不正JSON、生成失敗、未登録アセット、読み込み失敗でゲーム全体が停止しない。
+- ゲーム状態の所有者はPanda3Dだけで、生成APIはジョブとアセット情報だけを管理する。
+- AI出力の任意コード実行を許可しない。
